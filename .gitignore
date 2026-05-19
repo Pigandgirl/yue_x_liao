@@ -1,0 +1,60 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+vendor/
+
+# Build outputs
+build/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Docker volumes (local data)
+postgres_data/
+redis_data/
+minio_data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+coverage/
+
+# Flutter
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.dart_tool/
+
+# Go
+*.test
+*.out
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# Certificates (keep only in ssl folder)
+gateway/nginx/ssl/*.pem
+gateway/nginx/ssl/*.crt
+gateway/nginx/ssl/*.key
