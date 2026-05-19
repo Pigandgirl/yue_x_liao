@@ -9,13 +9,16 @@ import (
 	"syscall"
 	"time"
 
+	"yue_liao_api/internal/database"
+	"yue_liao_api/internal/handlers"
+	"yue_liao_api/internal/middleware"
+	"yue_liao_api/internal/websocket"
+
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
 )
 
 type Config struct {
@@ -29,55 +32,173 @@ type Config struct {
 	RedisPassword    string
 	AppHost          string
 	AppPort          string
-	MinioEndpoint    string
-	MinioAccessKey   string
-	MinioSecretKey   string
-	MinioBucket      string
-}
-
-type App struct {
-	fiber   *fiber.App
-	config  *Config
-	db      *pgxpool.Pool
-	redis   *redis.Client
+	JWTSecret        string
+	JWTExpiration    time.Duration
 }
 
 func main() {
 	cfg := loadConfig()
-	app := NewApp(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	if err := app.connectDatabase(); err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+	db, err := database.NewPostgresDB(ctx,
+		cfg.PostgresHost,
+		cfg.PostgresPort,
+		cfg.PostgresUser,
+		cfg.PostgresPassword,
+		cfg.PostgresDB,
+	)
+	if err != nil {
+		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
 	}
-	defer app.db.Pool().Close()
+	defer db.Close()
 
-	if err := app.connectRedis(); err != nil {
-		log.Fatalf("Failed to connect to Redis: %v", err)
+	log.Println("Connected to PostgreSQL")
+
+	if err := db.RunMigrations(ctx); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
 	}
-	defer app.redis.Close()
+	log.Println("Database migrations completed")
 
-	app.setupRoutes()
+	var redisDB *database.RedisDB
+	redisDB, err = database.NewRedisDB(ctx, cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword)
+	if err != nil {
+		log.Printf("Warning: Failed to connect to Redis: %v (continuing without Redis)", err)
+		redisDB = nil
+	} else {
+		defer redisDB.Close()
+		log.Println("Connected to Redis")
+	}
+
+	userRepo := database.NewUserRepository(db)
+	messageRepo := database.NewMessageRepository(db)
+
+	jwtMgr := middleware.NewJWTManager(cfg.JWTSecret, cfg.JWTExpiration)
+
+	hub := websocket.NewHub(userRepo, messageRepo, redisDB)
+	go hub.Run(ctx)
+
+	authHandler := handlers.NewAuthHandler(userRepo, jwtMgr)
+	messageHandler := handlers.NewMessageHandler(messageRepo, userRepo)
+	wsHandler := handlers.NewWebSocketHandler(hub, jwtMgr)
+
+	app := fiber.New(fiber.Config{
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+		BodyLimit:    10 * 1024 * 1024,
+	})
+
+	app.Use(recover.New())
+	app.Use(logger.New())
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: "*",
+		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
+		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
+	}))
+
+	app.Get("/health", func(c *fiber.Ctx) error {
+		if err := db.Ping(c.Context()); err != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"status":   "unhealthy",
+				"database": "disconnected",
+			})
+		}
+
+		status := fiber.Map{"status": "healthy", "database": "connected"}
+		if redisDB != nil {
+			if err := redisDB.Ping(c.Context()); err != nil {
+				status["redis"] = "disconnected"
+			} else {
+				status["redis"] = "connected"
+			}
+		} else {
+			status["redis"] = "not configured"
+		}
+
+		return c.JSON(status)
+	})
+
+	app.Get("/ready", func(c *fiber.Ctx) error {
+		if err := db.Ping(c.Context()); err != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"status": "not ready",
+				"error":  "database not available",
+			})
+		}
+		return c.JSON(fiber.Map{"status": "ready"})
+	})
+
+	api := app.Group("/api")
+
+	auth := api.Group("/auth")
+	auth.Post("/register", authHandler.Register)
+	auth.Post("/login", authHandler.Login)
+
+	apiProtected := api.Group("", middleware.JWTMiddleware(jwtMgr))
+
+	apiProtected.Get("/me", authHandler.GetCurrentUser)
+	apiProtected.Put("/public-key", authHandler.UpdatePublicKey)
+	apiProtected.Get("/users/search", authHandler.SearchUsers)
+
+	messages := apiProtected.Group("/messages")
+	messages.Get("", messageHandler.GetMessages)
+	messages.Get("/unread", messageHandler.GetUnreadCount)
+	messages.Post("/read", messageHandler.MarkAsRead)
+
+	conversations := apiProtected.Group("/conversations")
+	conversations.Get("", messageHandler.GetConversations)
+	conversations.Post("/:username/read", messageHandler.MarkConversationAsRead)
+	conversations.Get("/:username/unread", func(c *fiber.Ctx) error {
+		c.Query("with", c.Params("username"))
+		return messageHandler.GetUnreadCount(c)
+	})
+
+	wsGroup := app.Group("/ws")
+	wsGroup.Use(func(c *fiber.Ctx) error {
+		if !wsHandler.UpgradeCheck(c) {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "WebSocket upgrade failed",
+			})
+		}
+		return c.Next()
+	})
+	wsGroup.Get("", websocket.New(wsHandler.HandleWebSocket))
+
+	app.Get("/api/online-users", wsHandler.GetOnlineUsers)
+	app.Get("/api/users/:username/online", wsHandler.CheckUserOnline)
 
 	go func() {
-		if err := app.fiber.Listen(fmt.Sprintf("%s:%s", cfg.AppHost, cfg.AppPort)); err != nil {
+		addr := fmt.Sprintf("%s:%s", cfg.AppHost, cfg.AppPort)
+		log.Printf("Server starting on %s", addr)
+		if err := app.Listen(addr); err != nil {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
-
-	log.Printf("Server started on %s:%s", cfg.AppHost, cfg.AppPort)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Println("Shutting down server...")
-	if err := app.fiber.Shutdown(); err != nil {
+	cancel()
+
+	if err := app.Shutdown(); err != nil {
 		log.Printf("Error shutting down server: %v", err)
 	}
+
 	log.Println("Server stopped")
 }
 
 func loadConfig() *Config {
+	jwtExpiration := 24 * time.Hour
+	if exp := os.Getenv("JWT_EXPIRATION_HOURS"); exp != "" {
+		var hours int
+		if _, err := fmt.Sscanf(exp, "%d", &hours); err == nil {
+			jwtExpiration = time.Duration(hours) * time.Hour
+		}
+	}
+
 	return &Config{
 		PostgresHost:     getEnv("POSTGRES_HOST", "localhost"),
 		PostgresPort:     getEnv("POSTGRES_PORT", "5432"),
@@ -89,10 +210,8 @@ func loadConfig() *Config {
 		RedisPassword:    getEnv("REDIS_PASSWORD", ""),
 		AppHost:          getEnv("APP_HOST", "0.0.0.0"),
 		AppPort:          getEnv("APP_PORT", "8080"),
-		MinioEndpoint:    getEnv("MINIO_ENDPOINT", "localhost:9000"),
-		MinioAccessKey:   getEnv("MINIO_ROOT_USER", "minioadmin"),
-		MinioSecretKey:   getEnv("MINIO_ROOT_PASSWORD", ""),
-		MinioBucket:      getEnv("MINIO_BUCKET", "user-files"),
+		JWTSecret:        getEnv("JWT_SECRET", "default-secret-change-in-production"),
+		JWTExpiration:    jwtExpiration,
 	}
 }
 
@@ -101,243 +220,4 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
-}
-
-func NewApp(cfg *Config) *App {
-	f := fiber.New(fiber.Config{
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
-		BodyLimit:    100 * 1024 * 1024,
-	})
-
-	f.Use(recover.New())
-	f.Use(logger.New())
-	f.Use(cors.New(cors.Config{
-		AllowOrigins: "*",
-		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
-		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
-	}))
-
-	return &App{
-		fiber:  f,
-		config: cfg,
-	}
-}
-
-func (a *App) connectDatabase() error {
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		a.config.PostgresUser,
-		a.config.PostgresPassword,
-		a.config.PostgresHost,
-		a.config.PostgresPort,
-		a.config.PostgresDB,
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	poolConfig, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		return fmt.Errorf("failed to parse database config: %w", err)
-	}
-
-	poolConfig.MaxConns = 25
-	poolConfig.MinConns = 5
-	poolConfig.MaxConnLifetime = time.Hour
-	poolConfig.MaxConnIdleTime = 30 * time.Minute
-
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create connection pool: %w", err)
-	}
-
-	if err := pool.Ping(ctx); err != nil {
-		return fmt.Errorf("failed to ping database: %w", err)
-	}
-
-	a.db = pool
-	log.Println("Connected to PostgreSQL database")
-	return nil
-}
-
-func (a *App) connectRedis() error {
-	a.redis = redis.NewClient(&redis.Options{
-		Addr:         fmt.Sprintf("%s:%s", a.config.RedisHost, a.config.RedisPort),
-		Password:     a.config.RedisPassword,
-		DB:           0,
-		PoolSize:     50,
-		MinIdleConns: 10,
-		DialTimeout:  5 * time.Second,
-		ReadTimeout:  3 * time.Second,
-		WriteTimeout: 3 * time.Second,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := a.redis.Ping(ctx).Err(); err != nil {
-		return fmt.Errorf("failed to ping Redis: %w", err)
-	}
-
-	log.Println("Connected to Redis")
-	return nil
-}
-
-func (a *App) setupRoutes() {
-	a.fiber.Get("/health", a.healthCheck)
-	a.fiber.Get("/ready", a.readinessCheck)
-
-	api := a.fiber.Group("/api/v1")
-
-	api.Post("/auth/register", a.handleRegister)
-	api.Post("/auth/login", a.handleLogin)
-
-	users := api.Group("/users", a.authMiddleware)
-	users.Get("/:id", a.getUser)
-	users.Put("/:id", a.updateUser)
-
-	messages := api.Group("/messages", a.authMiddleware)
-	messages.Get("/:conversationId", a.getMessages)
-	messages.Post("/", a.sendMessage)
-
-	files := api.Group("/files", a.authMiddleware)
-	files.Post("/upload", a.uploadFile)
-	files.Get("/:fileId", a.downloadFile)
-	files.Delete("/:fileId", a.deleteFile)
-
-	a.fiber.Use("/ws", websocket.New(func(c *websocket.Conn) {
-		a.handleWebSocket(c)
-	}))
-}
-
-func (a *App) healthCheck(c *fiber.Ctx) error {
-	return c.JSON(fiber.Map{
-		"status": "healthy",
-		"time":   time.Now().UTC(),
-	})
-}
-
-func (a *App) readinessCheck(c *fiber.Ctx) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := a.db.Ping(ctx); err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-			"status":   "unhealthy",
-			"database": "disconnected",
-		})
-	}
-
-	if err := a.redis.Ping(ctx).Err(); err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-			"status": "unhealthy",
-			"redis":  "disconnected",
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"status":   "ready",
-		"database": "connected",
-		"redis":    "connected",
-	})
-}
-
-func (a *App) authMiddleware(c *fiber.Ctx) error {
-	auth := c.Get("Authorization")
-	if auth == "" {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "missing authorization header",
-		})
-	}
-	return c.Next()
-}
-
-func (a *App) handleRegister(c *fiber.Ctx) error {
-	return c.JSON(fiber.Map{
-		"message": "register endpoint - to be implemented",
-	})
-}
-
-func (a *App) handleLogin(c *fiber.Ctx) error {
-	return c.JSON(fiber.Map{
-		"message": "login endpoint - to be implemented",
-	})
-}
-
-func (a *App) getUser(c *fiber.Ctx) error {
-	userId := c.Params("id")
-	return c.JSON(fiber.Map{
-		"message": fmt.Sprintf("get user %s - to be implemented", userId),
-	})
-}
-
-func (a *App) updateUser(c *fiber.Ctx) error {
-	userId := c.Params("id")
-	return c.JSON(fiber.Map{
-		"message": fmt.Sprintf("update user %s - to be implemented", userId),
-	})
-}
-
-func (a *App) getMessages(c *fiber.Ctx) error {
-	conversationId := c.Params("conversationId")
-	return c.JSON(fiber.Map{
-		"message": fmt.Sprintf("get messages for conversation %s - to be implemented", conversationId),
-	})
-}
-
-func (a *App) sendMessage(c *fiber.Ctx) error {
-	return c.JSON(fiber.Map{
-		"message": "send message - to be implemented",
-	})
-}
-
-func (a *App) uploadFile(c *fiber.Ctx) error {
-	return c.JSON(fiber.Map{
-		"message": "upload file - to be implemented",
-	})
-}
-
-func (a *App) downloadFile(c *fiber.Ctx) error {
-	fileId := c.Params("fileId")
-	return c.JSON(fiber.Map{
-		"message": fmt.Sprintf("download file %s - to be implemented", fileId),
-	})
-}
-
-func (a *App) deleteFile(c *fiber.Ctx) error {
-	fileId := c.Params("fileId")
-	return c.JSON(fiber.Map{
-		"message": fmt.Sprintf("delete file %s - to be implemented", fileId),
-	})
-}
-
-func (a *App) handleWebSocket(c *websocket.Conn) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("WebSocket panic recovered: %v", r)
-		}
-		c.Close()
-	}()
-
-	log.Printf("WebSocket connection established: %s", c.RemoteAddr())
-
-	for {
-		_, msg, err := c.ReadMessage()
-		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("WebSocket connection closed: %s", c.RemoteAddr())
-			} else {
-				log.Printf("WebSocket read error: %v", err)
-			}
-			break
-		}
-
-		log.Printf("Received message: %s", string(msg))
-
-		if err := c.WriteMessage(websocket.TextMessage, []byte("echo: "+string(msg))); err != nil {
-			log.Printf("WebSocket write error: %v", err)
-			break
-		}
-	}
 }

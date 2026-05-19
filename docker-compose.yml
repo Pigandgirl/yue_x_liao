@@ -12,7 +12,6 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./backend/services/api/migrations:/docker-entrypoint-initdb.d
     networks:
       - chatnet
     healthcheck:
@@ -116,6 +115,7 @@ services:
       APP_HOST: ${APP_HOST:-0.0.0.0}
       APP_PORT: ${APP_PORT:-8080}
       JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRATION_HOURS: ${JWT_EXPIRATION_HOURS:-24}
       FILE_ENCRYPTION_KEY: ${FILE_ENCRYPTION_KEY}
     ports:
       - "8080:8080"
