@@ -34,6 +34,11 @@ type Config struct {
 	AppPort          string
 	JWTSecret        string
 	JWTExpiration    time.Duration
+	MinioEndpoint    string
+	MinioAccessKey   string
+	MinioSecretKey   string
+	MinioBucket      string
+	MinioUseSSL      bool
 }
 
 func main() {
@@ -83,6 +88,20 @@ func main() {
 	messageHandler := handlers.NewMessageHandler(messageRepo, userRepo)
 	sessionHandler := handlers.NewSessionHandler(sessionRepo, userRepo)
 	wsHandler := handlers.NewWebSocketHandler(hub, jwtMgr)
+
+	fileHandler, err := handlers.NewFileHandler(
+		cfg.MinioEndpoint,
+		cfg.MinioAccessKey,
+		cfg.MinioSecretKey,
+		cfg.MinioBucket,
+		cfg.MinioUseSSL,
+		userRepo,
+		messageRepo,
+	)
+	if err != nil {
+		log.Fatalf("Failed to initialize file handler: %v", err)
+	}
+	log.Println("File handler initialized")
 
 	app := fiber.New(fiber.Config{
 		ReadTimeout:  30 * time.Second,
@@ -162,6 +181,14 @@ func main() {
 	sessions.Get("", sessionHandler.GetUserSessions)
 	sessions.Get("/check", sessionHandler.GetSession)
 
+	files := apiProtected.Group("/file")
+	files.Post("/init-upload", fileHandler.InitUpload)
+	files.Post("/upload-chunk/:uploadId/:chunkIndex", fileHandler.UploadChunk)
+	files.Post("/complete-upload/:uploadId", fileHandler.CompleteUpload)
+	files.Get("/download/:uploadId/:chunkIndex", fileHandler.DownloadChunk)
+	files.Get("/status/:uploadId", fileHandler.GetUploadStatus)
+	files.Delete("/abort/:uploadId", fileHandler.AbortUpload)
+
 	wsGroup := app.Group("/ws")
 	wsGroup.Use(func(c *fiber.Ctx) error {
 		if !wsHandler.UpgradeCheck(c) {
@@ -220,6 +247,11 @@ func loadConfig() *Config {
 		AppPort:          getEnv("APP_PORT", "8080"),
 		JWTSecret:        getEnv("JWT_SECRET", "default-secret-change-in-production"),
 		JWTExpiration:    jwtExpiration,
+		MinioEndpoint:    getEnv("MINIO_ENDPOINT", "localhost:9000"),
+		MinioAccessKey:   getEnv("MINIO_ROOT_USER", "minioadmin"),
+		MinioSecretKey:   getEnv("MINIO_ROOT_PASSWORD", ""),
+		MinioBucket:      getEnv("MINIO_BUCKET", "user-files"),
+		MinioUseSSL:      getEnv("MINIO_USE_SSL", "false") == "true",
 	}
 }
 
