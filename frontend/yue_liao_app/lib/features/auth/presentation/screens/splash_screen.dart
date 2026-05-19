@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../../../../core/providers/auth_provider.dart';
-import '../../../../core/providers/chat_provider.dart';
+import '../../../core/providers/auth_provider.dart';
+import '../../../core/providers/chat_provider.dart';
 import '../widgets/register_screen.dart';
 import '../../../../features/auth/presentation/screens/login_screen.dart';
 import '../../../chat/presentation/screens/chat_list_page.dart';

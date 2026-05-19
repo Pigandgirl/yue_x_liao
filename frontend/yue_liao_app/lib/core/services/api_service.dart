@@ -206,6 +206,59 @@ class ApiService {
     }
   }
 
+  Future<Map<String, dynamic>> initSession({
+    required String recipientUsername,
+    required String ephemeralKey,
+    String? token,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$_baseUrl/sessions/init'),
+      headers: _headers(withAuth: true, token: token ?? await getToken()),
+      body: jsonEncode({
+        'recipient_username': recipientUsername,
+        'ephemeral_key': ephemeralKey,
+      }),
+    );
+
+    return await _handleResponse(response);
+  }
+
+  Future<Map<String, dynamic>> completeSession({
+    required String sessionId,
+    required String responseKey,
+    String? token,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$_baseUrl/sessions/complete'),
+      headers: _headers(withAuth: true, token: token ?? await getToken()),
+      body: jsonEncode({
+        'session_id': sessionId,
+        'response_key': responseKey,
+      }),
+    );
+
+    return await _handleResponse(response);
+  }
+
+  Future<Map<String, dynamic>> checkSession(String recipientUsername, {String? token}) async {
+    final response = await http.get(
+      Uri.parse('$_baseUrl/sessions/check?with=${Uri.encodeComponent(recipientUsername)}'),
+      headers: _headers(withAuth: true, token: token ?? await getToken()),
+    );
+
+    return await _handleResponse(response);
+  }
+
+  Future<List<dynamic>> getUserSessions({String? token}) async {
+    final response = await http.get(
+      Uri.parse('$_baseUrl/sessions'),
+      headers: _headers(withAuth: true, token: token ?? await getToken()),
+    );
+
+    final data = await _handleResponse(response);
+    return data['sessions'] ?? [];
+  }
+
   Future<bool> isAuthenticated() async {
     final token = await getToken();
     return token != null && token.isNotEmpty;

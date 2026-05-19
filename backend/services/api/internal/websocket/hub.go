@@ -39,6 +39,7 @@ type Hub struct {
 	mutex        sync.RWMutex
 	userRepo     *database.UserRepository
 	messageRepo  *database.MessageRepository
+	sessionRepo  *database.SessionRepository
 	redisDB      *database.RedisDB
 }
 
@@ -48,7 +49,7 @@ type BroadcastMessage struct {
 	Message []byte
 }
 
-func NewHub(userRepo *database.UserRepository, messageRepo *database.MessageRepository, redisDB *database.RedisDB) *Hub {
+func NewHub(userRepo *database.UserRepository, messageRepo *database.MessageRepository, sessionRepo *database.SessionRepository, redisDB *database.RedisDB) *Hub {
 	return &Hub{
 		clients:     make(map[uuid.UUID]*Client),
 		userClients: make(map[string]*Client),
@@ -57,6 +58,7 @@ func NewHub(userRepo *database.UserRepository, messageRepo *database.MessageRepo
 		broadcast:   make(chan *BroadcastMessage, 256),
 		userRepo:    userRepo,
 		messageRepo: messageRepo,
+		sessionRepo: sessionRepo,
 		redisDB:     redisDB,
 	}
 }

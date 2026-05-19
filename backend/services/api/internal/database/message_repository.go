@@ -19,9 +19,13 @@ func NewMessageRepository(db *PostgresDB) *MessageRepository {
 }
 
 func (r *MessageRepository) Create(ctx context.Context, msg *models.Message) error {
+	return r.CreateWithSession(ctx, msg, nil)
+}
+
+func (r *MessageRepository) CreateWithSession(ctx context.Context, msg *models.Message, sessionID *uuid.UUID) error {
 	query := `
-		INSERT INTO messages (id, sender, receiver, encrypted_payload, is_read, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO messages (id, sender, receiver, session_id, encrypted_payload, is_read, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`
 
 	msg.ID = uuid.New()
@@ -31,6 +35,7 @@ func (r *MessageRepository) Create(ctx context.Context, msg *models.Message) err
 		msg.ID,
 		msg.Sender,
 		msg.Receiver,
+		sessionID,
 		msg.EncryptedPayload,
 		msg.IsRead,
 		msg.CreatedAt,

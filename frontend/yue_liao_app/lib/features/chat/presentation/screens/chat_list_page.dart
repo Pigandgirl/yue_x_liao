@@ -6,7 +6,7 @@ import '../../../../core/services/chat_websocket_service.dart';
 import '../../../../core/models/conversation.dart';
 import 'chat_page.dart';
 import '../widgets/new_chat_dialog.dart';
-import '../../../../features/auth/presentation/screens/login_screen.dart';
+import '../../../auth/presentation/screens/login_screen.dart';
 
 class ChatListPage extends StatefulWidget {
   const ChatListPage({super.key});
@@ -256,9 +256,20 @@ class _ConversationTile extends StatelessWidget {
           ),
         ),
       ),
-      title: Text(
-        conversation.username,
-        style: const TextStyle(fontWeight: FontWeight.w500),
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(
+              conversation.username,
+              style: const TextStyle(fontWeight: FontWeight.w500),
+            ),
+          ),
+          Icon(
+            Icons.lock,
+            size: 14,
+            color: Theme.of(context).colorScheme.primary,
+          ),
+        ],
       ),
       subtitle: conversation.lastMessage != null
           ? Text(

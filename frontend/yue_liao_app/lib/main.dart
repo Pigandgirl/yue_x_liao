@@ -4,17 +4,24 @@ import 'core/config/app_config.dart';
 import 'core/theme/app_theme.dart';
 import 'core/services/api_service.dart';
 import 'core/services/chat_websocket_service.dart';
+import 'core/services/e2e_helper_simple.dart';
 import 'core/providers/auth_provider.dart';
 import 'core/providers/chat_provider.dart';
 import 'features/auth/presentation/screens/splash_screen.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const YueLiaoApp());
+
+  final e2eHelper = E2EHelper();
+  await e2eHelper.initialize();
+
+  runApp(YueLiaoApp(e2eHelper: e2eHelper));
 }
 
 class YueLiaoApp extends StatelessWidget {
-  const YueLiaoApp({super.key});
+  final E2EHelper e2eHelper;
+
+  const YueLiaoApp({super.key, required this.e2eHelper});
 
   @override
   Widget build(BuildContext context) {
@@ -24,12 +31,19 @@ class YueLiaoApp extends StatelessWidget {
           create: (_) => AppConfig.fromEnvironment(),
           dispose: (_, __) {},
         ),
+        Provider<E2EHelper>(
+          create: (_) => e2eHelper,
+          dispose: (_, __) {},
+        ),
         Provider<ApiService>(
           create: (ctx) => ApiService(ctx.read<AppConfig>()),
           dispose: (_, __) {},
         ),
         Provider<ChatWebSocketService>(
-          create: (ctx) => ChatWebSocketService(ctx.read<AppConfig>()),
+          create: (ctx) => ChatWebSocketService(
+            ctx.read<AppConfig>(),
+            ctx.read<E2EHelper>(),
+          ),
           dispose: (_, service) => service.dispose(),
         ),
         ChangeNotifierProvider<AuthProvider>(
@@ -39,11 +53,13 @@ class YueLiaoApp extends StatelessWidget {
           create: (ctx) => ChatProvider(
             ctx.read<ApiService>(),
             ctx.read<ChatWebSocketService>(),
+            ctx.read<E2EHelper>(),
           ),
           update: (_, __, previous) =>
               previous ?? ChatProvider(
                 ctx.read<ApiService>(),
                 ctx.read<ChatWebSocketService>(),
+                ctx.read<E2EHelper>(),
               ),
         ),
       ],

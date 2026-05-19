@@ -72,14 +72,16 @@ func main() {
 
 	userRepo := database.NewUserRepository(db)
 	messageRepo := database.NewMessageRepository(db)
+	sessionRepo := database.NewSessionRepository(db)
 
 	jwtMgr := middleware.NewJWTManager(cfg.JWTSecret, cfg.JWTExpiration)
 
-	hub := websocket.NewHub(userRepo, messageRepo, redisDB)
+	hub := websocket.NewHub(userRepo, messageRepo, sessionRepo, redisDB)
 	go hub.Run(ctx)
 
 	authHandler := handlers.NewAuthHandler(userRepo, jwtMgr)
 	messageHandler := handlers.NewMessageHandler(messageRepo, userRepo)
+	sessionHandler := handlers.NewSessionHandler(sessionRepo, userRepo)
 	wsHandler := handlers.NewWebSocketHandler(hub, jwtMgr)
 
 	app := fiber.New(fiber.Config{
@@ -153,6 +155,12 @@ func main() {
 		c.Query("with", c.Params("username"))
 		return messageHandler.GetUnreadCount(c)
 	})
+
+	sessions := apiProtected.Group("/sessions")
+	sessions.Post("/init", sessionHandler.InitSession)
+	sessions.Post("/complete", sessionHandler.CompleteSession)
+	sessions.Get("", sessionHandler.GetUserSessions)
+	sessions.Get("/check", sessionHandler.GetSession)
 
 	wsGroup := app.Group("/ws")
 	wsGroup.Use(func(c *fiber.Ctx) error {
