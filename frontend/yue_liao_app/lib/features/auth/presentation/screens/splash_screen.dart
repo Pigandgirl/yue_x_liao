@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../../domain/repositories/auth_repository.dart';
-import '../screens/login_screen.dart';
-import '../../../chat/presentation/screens/home_screen.dart';
+import '../../../../core/providers/auth_provider.dart';
+import '../../../../core/providers/chat_provider.dart';
+import '../widgets/register_screen.dart';
+import '../../../../features/auth/presentation/screens/login_screen.dart';
+import '../../../chat/presentation/screens/chat_list_page.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -19,18 +21,26 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _checkAuth() async {
-    await Future.delayed(const Duration(seconds: 2));
+    await Future.delayed(const Duration(seconds: 1));
 
     if (!mounted) return;
 
-    final authRepository = context.read<AuthRepository>();
-    final isAuthenticated = await authRepository.isAuthenticated();
+    final authProvider = context.read<AuthProvider>();
+    final chatProvider = context.read<ChatProvider>();
+
+    await authProvider.checkAuthStatus();
 
     if (!mounted) return;
 
-    if (isAuthenticated) {
+    if (authProvider.isAuthenticated) {
+      final token = await authProvider.getToken();
+      if (token != null) {
+        await chatProvider.connect(token);
+      }
+
+      if (!mounted) return;
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
+        MaterialPageRoute(builder: (_) => const ChatListPage()),
       );
     } else {
       Navigator.of(context).pushReplacement(

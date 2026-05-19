@@ -2,15 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'core/config/app_config.dart';
 import 'core/theme/app_theme.dart';
+import 'core/services/api_service.dart';
+import 'core/services/chat_websocket_service.dart';
+import 'core/providers/auth_provider.dart';
+import 'core/providers/chat_provider.dart';
 import 'features/auth/presentation/screens/splash_screen.dart';
-import 'features/auth/data/repositories/auth_repository_impl.dart';
-import 'features/auth/domain/repositories/auth_repository.dart';
-import 'features/chat/data/repositories/chat_repository_impl.dart';
-import 'features/chat/domain/repositories/chat_repository.dart';
-import 'features/file/data/repositories/file_repository_impl.dart';
-import 'features/file/domain/repositories/file_repository.dart';
-import 'core/services/websocket_service.dart';
-import 'core/services/encryption_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,24 +24,27 @@ class YueLiaoApp extends StatelessWidget {
           create: (_) => AppConfig.fromEnvironment(),
           dispose: (_, __) {},
         ),
-        Provider<EncryptionService>(
-          create: (_) => EncryptionService(),
+        Provider<ApiService>(
+          create: (ctx) => ApiService(ctx.read<AppConfig>()),
           dispose: (_, __) {},
         ),
-        Provider<WebSocketService>(
-          create: (_) => WebSocketService(),
-          dispose: (_, service) => service.disconnect(),
+        Provider<ChatWebSocketService>(
+          create: (ctx) => ChatWebSocketService(ctx.read<AppConfig>()),
+          dispose: (_, service) => service.dispose(),
         ),
-        ProxyProvider<WebSocketService, ChatRepository>(
-          update: (_, wsService, __) => ChatRepositoryImpl(wsService),
+        ChangeNotifierProvider<AuthProvider>(
+          create: (ctx) => AuthProvider(ctx.read<ApiService>()),
         ),
-        ProxyProvider2<AppConfig, EncryptionService, FileRepository>(
-          update: (_, config, encryption, __) =>
-              FileRepositoryImpl(config, encryption),
-        ),
-        ProxyProvider2<AppConfig, EncryptionService, AuthRepository>(
-          update: (_, config, encryption, __) =>
-              AuthRepositoryImpl(config, encryption),
+        ChangeNotifierProxyProvider<ApiService, ChatProvider>(
+          create: (ctx) => ChatProvider(
+            ctx.read<ApiService>(),
+            ctx.read<ChatWebSocketService>(),
+          ),
+          update: (_, __, previous) =>
+              previous ?? ChatProvider(
+                ctx.read<ApiService>(),
+                ctx.read<ChatWebSocketService>(),
+              ),
         ),
       ],
       child: MaterialApp(
